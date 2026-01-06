@@ -4078,6 +4078,28 @@ impl Application for App {
                         tab::Command::SetPermissions(path, mode) => {
                             commands.push(self.operation(Operation::SetPermissions { path, mode }));
                         }
+                        tab::Command::SetMultiplePermissions(permissions) => {
+                            let mut batch =
+                                cosmic::Task::batch(permissions.into_iter().map(|(path, mode)| {
+                                    self.operation(Operation::SetPermissions { path, mode })
+                                }));
+                            if let Some(tab) = self.tab_model.data::<Tab>(entity) {
+                                batch = batch.chain(
+                                    self.update_tab(
+                                        entity,
+                                        tab.location.clone(),
+                                        Some(
+                                            tab.selected_locations()
+                                                .into_iter()
+                                                .filter_map(Location::into_path_opt)
+                                                .collect(),
+                                        ),
+                                    ),
+                                );
+                            }
+
+                            commands.push(batch);
+                        }
                         tab::Command::WindowDrag => {
                             if let Some(window_id) = self.core.main_window_id() {
                                 commands.push(window::drag(window_id));

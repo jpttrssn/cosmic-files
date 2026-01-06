@@ -1,16 +1,7 @@
 use cosmic::{
-    Apply, Element, cosmic_theme, font,
+    Apply, Element, Task, cosmic_theme, font,
     iced::{
-        Alignment,
-        Border,
-        Color,
-        ContentFit,
-        Length,
-        Point,
-        Rectangle,
-        Size,
-        Subscription,
-        Vector,
+        Alignment, Border, Color, ContentFit, Length, Point, Rectangle, Size, Subscription, Vector,
         advanced::{
             graphics,
             text::{self, Paragraph},
@@ -20,9 +11,7 @@ use cosmic::{
         event,
         futures::{self, SinkExt},
         keyboard::Modifiers,
-        padding,
-        stream,
-        //TODO: export in cosmic::widget
+        padding, stream,
         widget::{
             horizontal_rule, rule,
             scrollable::{self, AbsoluteOffset, Viewport},
@@ -57,7 +46,7 @@ use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     error::Error,
     fmt::{self, Display},
     fs::{self, File, Metadata},
@@ -1617,6 +1606,7 @@ pub enum Command {
     Preview(PreviewKind),
     SetOpenWith(Mime, String),
     SetPermissions(PathBuf, u32),
+    SetMultiplePermissions(Vec<(PathBuf, u32)>),
     SetSort(String, HeadingOptions, bool),
     WindowDrag,
     WindowToggleMaximize,
@@ -1671,7 +1661,8 @@ pub enum Message {
     SelectFirst,
     SelectLast,
     SetOpenWith(Mime, String),
-    SetPermissions(PathBuf, u32),
+    SetPermissions(Option<PathBuf>, u32),
+    ShiftPermissions(Option<(PathBuf, u32)>, u32, u32),
     SetSort(HeadingOptions, bool),
     TabComplete(PathBuf, Vec<(String, PathBuf)>),
     Thumbnail(PathBuf, ItemThumbnail),
@@ -2366,7 +2357,7 @@ impl Item {
                             Some(get_mode_part(mode, MODE_SHIFT_USER).try_into().unwrap()),
                             move |selected| {
                                 Message::SetPermissions(
-                                    user_path.clone(),
+                                    Some(user_path.clone()),
                                     set_mode_part(
                                         mode,
                                         MODE_SHIFT_USER,
@@ -2389,7 +2380,7 @@ impl Item {
                             Some(get_mode_part(mode, MODE_SHIFT_GROUP).try_into().unwrap()),
                             move |selected| {
                                 Message::SetPermissions(
-                                    group_path.clone(),
+                                    Some(group_path.clone()),
                                     set_mode_part(
                                         mode,
                                         MODE_SHIFT_GROUP,
@@ -2407,7 +2398,7 @@ impl Item {
                         Some(get_mode_part(mode, MODE_SHIFT_OTHER).try_into().unwrap()),
                         move |selected| {
                             Message::SetPermissions(
-                                other_path.clone(),
+                                Some(other_path.clone()),
                                 set_mode_part(mode, MODE_SHIFT_OTHER, selected.try_into().unwrap()),
                             )
                         },
@@ -3996,9 +3987,43 @@ impl Tab {
             Message::SetOpenWith(mime, id) => {
                 commands.push(Command::SetOpenWith(mime, id));
             }
-            Message::SetPermissions(path, mode) => {
-                commands.push(Command::SetPermissions(path, mode));
-            }
+            Message::SetPermissions(path_opt, mode) => match path_opt {
+                Some(path) => commands.push(Command::SetPermissions(path, mode)),
+                None => {
+                    for item in self.items_opt().map_or(Vec::new(), |items| {
+                        items.iter().filter(|item| item.selected).collect()
+                    }) {
+                        if let Some(path) = item.path_opt() {
+                            commands.push(Command::SetPermissions(path.clone(), mode));
+                        }
+                    }
+                }
+            },
+            Message::ShiftPermissions(path_mode_opt, shift, bits) => match path_mode_opt {
+                Some((path, mode)) => commands.push(Command::SetPermissions(
+                    path,
+                    set_mode_part(mode, shift, bits.try_into().unwrap()),
+                )),
+                // Shift permissions on all selected items
+                None => {
+                    let mut permissions = Vec::new();
+                    for item in self.items_opt().map_or(Vec::new(), |items| {
+                        items.iter().filter(|item| item.selected).collect()
+                    }) {
+                        if let (Some(path), Some(mode)) = (
+                            item.path_opt(),
+                            item.file_metadata()
+                                .and_then(|metadata| Some(metadata.mode())),
+                        ) {
+                            permissions.push((
+                                path.clone(),
+                                set_mode_part(mode, shift, bits.try_into().unwrap()),
+                            ));
+                        }
+                    }
+                    commands.push(Command::SetMultiplePermissions(permissions));
+                }
+            },
             Message::SetSort(heading_option, dir) => {
                 if !matches!(self.location, Location::Search(..)) {
                     self.sort_name = heading_option;
@@ -5912,6 +5937,11 @@ impl Tab {
 
         let mut total_size: u64 = 0;
         let mut mime_type_counts: BTreeMap<String, u64> = BTreeMap::new();
+        let mut user_name: BTreeSet<String> = BTreeSet::new();
+        let mut mode_user: BTreeSet<u32> = BTreeSet::new();
+        let mut group_name: BTreeSet<String> = BTreeSet::new();
+        let mut mode_group: BTreeSet<u32> = BTreeSet::new();
+        let mut mode_other: BTreeSet<u32> = BTreeSet::new();
         let mut calculating_dir_size = false;
         let mut dir_size_error: Option<String> = None;
 
@@ -5935,6 +5965,20 @@ impl Tab {
                 } else {
                     total_size = total_size.saturating_add(metadata.len());
                 }
+                let mode = metadata.mode();
+                user_name.insert(
+                    get_user_by_uid(metadata.uid())
+                        .and_then(|user| user.name().to_str().map(ToOwned::to_owned))
+                        .unwrap_or_default(),
+                );
+                mode_user.insert(get_mode_part(mode, MODE_SHIFT_USER));
+                group_name.insert(
+                    get_group_by_gid(metadata.gid())
+                        .and_then(|group| group.name().to_str().map(ToOwned::to_owned))
+                        .unwrap_or_default(),
+                );
+                mode_group.insert(get_mode_part(mode, MODE_SHIFT_GROUP));
+                mode_other.insert(get_mode_part(mode, MODE_SHIFT_OTHER));
             }
         }
         let mut mime_types: Vec<(String, u64)> = mime_type_counts.into_iter().collect();
@@ -5974,6 +6018,7 @@ impl Tab {
         column = column.push(widget::button::standard(fl!("open")).on_press(Message::Open(None)));
 
         let mut settings = Vec::new();
+        // Only allow modifying open-with if all mime types are the same
         if mime_types.len() == 1 {
             if let Some(mime) = mime_types
                 .get(0)
@@ -6003,6 +6048,88 @@ impl Tab {
                 }
             }
         }
+
+        #[cfg(unix)]
+        // The following is a bit of a hack to make the dropdown selector
+        // fill the available space when selected is None so it can be
+        // clicked on easier.
+        fn dropdown_width(use_default: bool) -> Length {
+            if use_default {
+                Length::Shrink
+            } else {
+                Length::Fill
+            }
+        }
+
+        // Only return mode part if it's the only one
+        fn selected_mode_part(mut modes: BTreeSet<u32>) -> Option<usize> {
+            match (modes.pop_first(), modes.pop_first()) {
+                (Some(mode), None) => Some(mode.try_into().unwrap()),
+                _ => None,
+            }
+        }
+
+        let mode_part_user = selected_mode_part(mode_user);
+        settings.push(
+            widget::settings::item::builder(
+                user_name.into_iter().collect::<Vec<String>>().join(", "),
+            )
+            .description(fl!("owner"))
+            .control(
+                widget::dropdown(
+                    Cow::Borrowed(MODE_NAMES.as_slice()),
+                    mode_part_user,
+                    move |selected| {
+                        Message::ShiftPermissions(
+                            None,
+                            MODE_SHIFT_USER,
+                            selected.try_into().unwrap(),
+                        )
+                    },
+                )
+                .width(dropdown_width(mode_part_user.is_some())),
+            ),
+        );
+
+        let mode_part_group = selected_mode_part(mode_group);
+        settings.push(
+            widget::settings::item::builder(
+                group_name.into_iter().collect::<Vec<String>>().join(", "),
+            )
+            .description(fl!("group"))
+            .control(
+                widget::dropdown(
+                    Cow::Borrowed(MODE_NAMES.as_slice()),
+                    mode_part_group,
+                    move |selected| {
+                        Message::ShiftPermissions(
+                            None,
+                            MODE_SHIFT_GROUP,
+                            selected.try_into().unwrap(),
+                        )
+                    },
+                )
+                .width(dropdown_width(mode_part_group.is_some())),
+            ),
+        );
+
+        let mode_part_other = selected_mode_part(mode_other);
+        settings.push(
+            widget::settings::item::builder(fl!("other")).control(
+                widget::dropdown(
+                    Cow::Borrowed(MODE_NAMES.as_slice()),
+                    mode_part_other,
+                    move |selected| {
+                        Message::ShiftPermissions(
+                            None,
+                            MODE_SHIFT_OTHER,
+                            selected.try_into().unwrap(),
+                        )
+                    },
+                )
+                .width(dropdown_width(mode_part_other.is_some())),
+            ),
+        );
 
         if !settings.is_empty() {
             let mut section = widget::settings::section();
