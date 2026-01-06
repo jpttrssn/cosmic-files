@@ -3765,8 +3765,18 @@ impl Tab {
                                 if item.selected {
                                     if let Some(location) = &item.location_opt {
                                         if item.metadata.is_dir() {
-                                            //TODO: allow opening multiple tabs?
-                                            cd = Some(location.clone());
+                                            if let Some(path) = location.path_opt() {
+                                                match self.mode {
+                                                    Mode::App => {
+                                                        commands.push(Command::OpenInNewTab(
+                                                            path.clone(),
+                                                        ));
+                                                    }
+                                                    _ => {
+                                                        open_files.push(path.clone());
+                                                    }
+                                                }
+                                            }
                                         } else if let Some(path) = location.path_opt() {
                                             open_files.push(path.clone());
                                         }
@@ -3776,7 +3786,9 @@ impl Tab {
                                 }
                             }
 
-                            commands.push(Command::OpenFile(open_files));
+                            if !open_files.is_empty() {
+                                commands.push(Command::OpenFile(open_files));
+                            }
                         }
                     }
                 }
